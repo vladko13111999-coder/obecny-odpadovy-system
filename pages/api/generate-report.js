@@ -1,8 +1,8 @@
+@"
 import { createClient } from '@supabase/supabase-js';
 import { stringify } from 'csv-stringify/sync';
 import ExcelJS from 'exceljs';
 
-// Mapovanie typov odpadu na kódy podľa Európskeho katalógu odpadov (EWC) a slovenskej legislatívy
 const WASTE_CODE_MAPPING = {
   'zmesovy': { kod: '20 03 01', nakladanie: 'D01', nazov: 'Zmiešaný komunálny odpad' },
   'plast': { kod: '20 01 39', nakladanie: 'R03', nazov: 'Plast - triedený komunálny odpad' },
@@ -10,7 +10,6 @@ const WASTE_CODE_MAPPING = {
   'sklo': { kod: '20 01 02', nakladanie: 'R03', nazov: 'Sklo - triedený komunálny odpad' }
 };
 
-// Funkcia na získanie kódu odpadu a nakladania
 function getWasteCodes(typOdpadu, kodOdpadu, kodNakladania) {
   if (kodOdpadu && kodNakladania) {
     return { kod: kodOdpadu, nakladanie: kodNakladania };
@@ -19,7 +18,6 @@ function getWasteCodes(typOdpadu, kodOdpadu, kodNakladania) {
   return mapping || { kod: kodOdpadu || '20 03 01', nakladanie: kodNakladania || 'D01' };
 }
 
-// Funkcia na escapovanie XML znakov
 function escapeXml(text) {
   return String(text)
     .replace(/&/g, '&amp;')
@@ -35,7 +33,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Overenie tokenu
     const authHeader = req.headers.authorization;
     const token = authHeader?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'No token' });
@@ -49,7 +46,6 @@ export default async function handler(req, res) {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return res.status(401).json({ error: 'Unauthorized' });
 
-    // Získanie údajov o obci
     const { data: obec, error: obecError } = await supabase
       .from('obce')
       .select('*')
@@ -61,23 +57,18 @@ export default async function handler(req, res) {
     const { kvartal, rok } = req.body;
     if (!kvartal || !rok) return res.status(400).json({ error: 'Chýba kvartál alebo rok' });
 
-    // Validácia kvartálu a roka
     if (kvartal < 1 || kvartal > 4) return res.status(400).json({ error: 'Neplatný kvartál' });
     if (rok < 2000 || rok > 2100) return res.status(400).json({ error: 'Neplatný rok' });
 
-    // Výpočet kvartálu - opravené pre roky 2027+
     const quarterStartMonth = (kvartal - 1) * 3;
     const quarterEndMonth = quarterStartMonth + 2;
     
-    // Použitie UTC dátumu pre správne výpočty aj pre budúce roky
     const startDate = new Date(Date.UTC(rok, quarterStartMonth, 1));
     const endDate = new Date(Date.UTC(rok, quarterEndMonth + 1, 0, 23, 59, 59));
     
-    // Formátovanie dátumov pre databázu (YYYY-MM-DD)
     const startDateStr = startDate.toISOString().split('T')[0];
     const endDateStr = endDate.toISOString().split('T')[0];
 
-    // Získanie všetkých vývozov za obdobie
     const { data: vyvozy, error: vyvozError } = await supabase
       .from('vyvozy')
       .select('*')
@@ -101,7 +92,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Agregácia podľa (kod_odpadu, kod_nakladania) s automatickým mapovaním
     const aggregated = {};
     vyvozy.forEach(v => {
       const codes = getWasteCodes(v.typ_odpadu, v.kod_odpadu, v.kod_nakladania);
@@ -120,7 +110,6 @@ export default async function handler(req, res) {
 
     const aggregatedArray = Object.values(aggregated).filter(item => item.celkom_kg > 0);
 
-    // 1. Vytvorenie XML podľa ISOH formátu pre Slovensko
     const today = new Date();
     const formattedDate = today.toISOString().split('T')[0];
 
@@ -156,7 +145,6 @@ export default async function handler(req, res) {
     const xmlBase64 = Buffer.from(xmlContent, 'utf8').toString('base64');
     const xmlDataUri = `data:text/xml;charset=utf-8;base64,${xmlBase64}`;
 
-    // 2. CSV podľa slovenského formátu (oddeľovač ;, desatinná čiarka)
     const csvData = [
       ['Kód odpadu', 'Kód nakladania', 'Množstvo (kg)'],
       ...aggregatedArray.map(item => [
@@ -174,7 +162,6 @@ export default async function handler(req, res) {
     const csvBase64 = Buffer.from(csvContent, 'utf8').toString('base64');
     const csvDataUri = `data:text/csv;charset=utf-8;base64,${csvBase64}`;
 
-    // 3. XLSX s formátovaním
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet(`Report Q${kvartal} ${rok}`);
     
@@ -205,7 +192,6 @@ export default async function handler(req, res) {
     const xlsxBase64 = buffer.toString('base64');
     const xlsxDataUri = `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${xlsxBase64}`;
 
-    // 4. Uloženie do tabuľky reporty s riadnym ošetrením chýb
     try {
       console.log(`Ukladám report pre obec ${obec.id}, kvartál ${kvartal}, rok ${rok}`);
 
@@ -274,3 +260,5 @@ export default async function handler(req, res) {
     console.error('Chyba pri generovaní reportu:', error);
     res.status(500).json({ error: error.message });
   }
+}
+"@ | Out-File -FilePath pages/api/generate-report.js -Encoding utf8
