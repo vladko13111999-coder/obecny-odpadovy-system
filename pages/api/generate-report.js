@@ -274,4 +274,3 @@ export default async function handler(req, res) {
     console.error('Chyba pri generovaní reportu:', error);
     res.status(500).json({ error: error.message });
   }
-}
