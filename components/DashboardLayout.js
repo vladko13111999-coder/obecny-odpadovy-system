@@ -14,6 +14,8 @@ export default function DashboardLayout({ children, obec }) {
     { href: '/dashboard', label: 'Prehľad', icon: '📊' },
     { href: '/dashboard/obyvatelia', label: 'Obyvatelia', icon: '👥' },
     { href: '/dashboard/vyvozy', label: 'Vývozy', icon: '🗑️' },
+    { href: '/dashboard/kalendar', label: 'Harmonogram vývozov', icon: '📅' },
+    { href: '/dashboard/odmeny', label: 'Odmeny', icon: '🎁' },          // <-- NOVÁ POLOŽKA
     { href: '/dashboard/reporty', label: 'Reporty pre štát', icon: '📄' },
     { href: '/dashboard/nastavenia', label: 'Nastavenia', icon: '⚙️' },
   ];

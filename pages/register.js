@@ -1,223 +1,242 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
-import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
+import DashboardLayout from '@/components/DashboardLayout';
 
-export default function Register() {
+export default function Nastavenia() {
   const router = useRouter();
+  const [obec, setObec] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
   const [formData, setFormData] = useState({
     nazov: '',
+    ico: '',
+    ulica: '',
+    mesto: '',
+    psc: '',
     email: '',
-    password: '',
-    confirmPassword: '',
-    velkost_obce: 'mala'
+    velkost_obce: ''
   });
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
 
-  const handleChange = (e) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value
-    });
-  };
+  useEffect(() => {
+    checkAuth();
+  }, []);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-
-    // Validation
-    if (formData.password !== formData.confirmPassword) {
-      setError('Heslá sa nezhodujú');
-      setLoading(false);
-      return;
-    }
-
-    if (formData.password.length < 6) {
-      setError('Heslo musí mať aspoň 6 znakov');
-      setLoading(false);
-      return;
-    }
-
+  const checkAuth = async () => {
     try {
-      // Create user in Supabase Auth
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: formData.email,
-        password: formData.password,
-      });
-
-      if (authError) throw authError;
-
-      if (!authData.user) {
-        throw new Error('Nepodarilo sa vytvoriť používateľa');
+      const { data: { user } } = await supabase.auth.getUser();
+      
+      if (!user) {
+        router.push('/login');
+        return;
       }
 
-      // Calculate trial dates
-      const trialStart = new Date();
-      const trialEnd = new Date();
-      trialEnd.setDate(trialEnd.getDate() + 30);
-
-      // Create municipality record
-      const { error: dbError } = await supabase
+      const { data: obecData, error: obecError } = await supabase
         .from('obce')
-        .insert([
-          {
-            nazov: formData.nazov,
-            email: formData.email,
-            velkost_obce: formData.velkost_obce,
-            subscription_status: 'trial',
-            trial_start: trialStart.toISOString(),
-            trial_end: trialEnd.toISOString(),
-            auth_user_id: authData.user.id
-          }
-        ]);
+        .select('*')
+        .eq('auth_user_id', user.id)
+        .single();
 
-      if (dbError) throw dbError;
-
-      // Sign in the user
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: formData.email,
-        password: formData.password,
+      if (obecError) throw obecError;
+      
+      setObec(obecData);
+      setFormData({
+        nazov: obecData.nazov || '',
+        ico: obecData.ico || '',
+        ulica: obecData.ulica || '',
+        mesto: obecData.mesto || '',
+        psc: obecData.psc || '',
+        email: obecData.email || '',
+        velkost_obce: obecData.velkost_obce || 'mala'
       });
-
-      if (signInError) throw signInError;
-
-      // Redirect to dashboard
-      router.push('/dashboard');
-    } catch (err) {
-      console.error('Registration error:', err);
-      setError(err.message || 'Chyba pri registrácii. Skúste to znova.');
+    } catch (error) {
+      console.error('Error loading data:', error);
+      router.push('/login');
     } finally {
       setLoading(false);
     }
   };
 
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setMessage('');
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      const response = await fetch('/api/obec', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify(formData),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setMessage('Nastavenia boli úspešne uložené.');
+        setObec(data);
+      } else {
+        setMessage('Chyba: ' + data.error);
+      }
+    } catch (error) {
+      setMessage('Nastala chyba pri ukladaní.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-xl text-gray-600">Načítavam...</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 flex items-center justify-center px-4 py-12">
-      <div className="max-w-md w-full">
-        <div className="bg-white rounded-lg shadow-xl p-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2 text-center">
-            Registrácia obce
-          </h1>
-          <p className="text-gray-600 text-center mb-6">
-            Získajte 30-dňovú skúšobnú verziu zadarmo
-          </p>
+    <DashboardLayout obec={obec}>
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-3xl font-bold text-gray-900">Nastavenia obce</h2>
+          <p className="text-gray-600">Upravte základné údaje vašej obce</p>
+        </div>
 
-          {error && (
-            <div className="bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded mb-4">
-              {error}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="bg-white rounded-lg shadow-sm p-6">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Názov obce */}
             <div>
-              <label htmlFor="nazov" className="block text-sm font-medium text-gray-700 mb-1">
-                Názov obce *
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Názov obce
               </label>
               <input
                 type="text"
-                id="nazov"
                 name="nazov"
-                required
                 value={formData.nazov}
                 onChange={handleChange}
+                required
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                placeholder="Napr. Obec Horná Dolná"
               />
             </div>
 
+            {/* IČO */}
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
-                Email *
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                IČO
+              </label>
+              <input
+                type="text"
+                name="ico"
+                value={formData.ico}
+                onChange={handleChange}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              />
+            </div>
+
+            {/* Ulica a číslo */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Ulica a číslo
+              </label>
+              <input
+                type="text"
+                name="ulica"
+                value={formData.ulica}
+                onChange={handleChange}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              />
+            </div>
+
+            {/* Mesto a PSČ */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Mesto
+                </label>
+                <input
+                  type="text"
+                  name="mesto"
+                  value={formData.mesto}
+                  onChange={handleChange}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  PSČ
+                </label>
+                <input
+                  type="text"
+                  name="psc"
+                  value={formData.psc}
+                  onChange={handleChange}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                />
+              </div>
+            </div>
+
+            {/* Email (readonly) */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Email (prihlasovací)
               </label>
               <input
                 type="email"
-                id="email"
-                name="email"
-                required
                 value={formData.email}
-                onChange={handleChange}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                placeholder="starosta@obec.sk"
+                disabled
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500"
               />
+              <p className="text-xs text-gray-500 mt-1">Email nie je možné zmeniť</p>
             </div>
 
+            {/* Veľkosť obce */}
             <div>
-              <label htmlFor="velkost_obce" className="block text-sm font-medium text-gray-700 mb-1">
-                Veľkosť obce *
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Veľkosť obce
               </label>
               <select
-                id="velkost_obce"
                 name="velkost_obce"
-                required
                 value={formData.velkost_obce}
                 onChange={handleChange}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
               >
-                <option value="mala">Malá obec (do 500 obyvateľov) - 49 €/mesiac</option>
-                <option value="stredna">Stredná obec (500-2000 obyvateľov) - 99 €/mesiac</option>
-                <option value="velka">Veľká obec (nad 2000 obyvateľov) - 149 €/mesiac</option>
+                <option value="mala">Malá (do 500 obyvateľov)</option>
+                <option value="stredna">Stredná (500-2000 obyvateľov)</option>
+                <option value="velka">Veľká (nad 2000 obyvateľov)</option>
               </select>
             </div>
 
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
-                Heslo *
-              </label>
-              <input
-                type="password"
-                id="password"
-                name="password"
-                required
-                value={formData.password}
-                onChange={handleChange}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                placeholder="Minimálne 6 znakov"
-              />
-            </div>
+            {/* Správa */}
+            {message && (
+              <div className={`p-3 rounded-lg text-sm ${
+                message.includes('úspešne') ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+              }`}>
+                {message}
+              </div>
+            )}
 
-            <div>
-              <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 mb-1">
-                Potvrdenie hesla *
-              </label>
-              <input
-                type="password"
-                id="confirmPassword"
-                name="confirmPassword"
-                required
-                value={formData.confirmPassword}
-                onChange={handleChange}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                placeholder="Zopakujte heslo"
-              />
+            {/* Tlačidlo */}
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={saving}
+                className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {saving ? 'Ukladám...' : 'Uložiť zmeny'}
+              </button>
             </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? 'Registrujem...' : 'Registrovať obec'}
-            </button>
           </form>
-
-          <div className="mt-6 text-center">
-            <p className="text-gray-600">
-              Už máte účet?{' '}
-              <Link href="/login" className="text-blue-600 hover:text-blue-700 font-medium">
-                Prihláste sa
-              </Link>
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-6 text-center">
-          <Link href="/" className="text-gray-600 hover:text-gray-800">
-            ← Späť na hlavnú stránku
-          </Link>
         </div>
       </div>
-    </div>
+    </DashboardLayout>
   );
 }

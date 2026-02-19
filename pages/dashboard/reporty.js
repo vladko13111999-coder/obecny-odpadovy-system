@@ -46,55 +46,63 @@ export default function Reporty() {
   };
 
   const loadReporty = async (obecId) => {
-    try {
-      const { data, error } = await supabase
-        .from('reporty')
-        .select('*')
-        .eq('obec_id', obecId)
-        .order('rok', { ascending: false })
-        .order('kvartal', { ascending: false });
+  console.log('loadReporty volaná s obecId:', obecId);
+  try {
+    const { data, error } = await supabase
+      .from('reporty')
+      .select('*')
+      .eq('obec_id', obecId)
+      .order('rok', { ascending: false })
+      .order('kvartal', { ascending: false });
 
-      if (error) throw error;
-      setReporty(data || []);
-    } catch (error) {
-      console.error('Error loading reports:', error);
+    if (error) {
+      console.error('Chyba pri načítaní reportov:', error);
+      throw error;
     }
-  };
+    
+    console.log('Načítané reporty:', data);
+    setReporty(data || []);
+  } catch (error) {
+    console.error('Error loading reports:', error);
+  }
+};
 
-  const handleGenerateReport = async () => {
-    setGenerating(true);
+const handleGenerateReport = async () => {
+  setGenerating(true);
+  console.log('Generujem report pre:', selectedQuarter);
 
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session) {
-        throw new Error('No session');
-      }
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    console.log('Session token existuje:', !!session);
 
-      const response = await fetch('/api/generate-report', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify(selectedQuarter),
-      });
+    const response = await fetch('/api/generate-report', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify(selectedQuarter),
+    });
 
-      const data = await response.json();
+    console.log('Odpoveď z API:', response.status);
+    const data = await response.json();
+    console.log('Dáta z API:', data);
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to generate report');
-      }
-
-      alert(`Report vygenerovaný! Celkovo ${data.summary.totalCollections} záznamov.`);
-      await loadReporty(obec.id);
-    } catch (error) {
-      console.error('Error generating report:', error);
-      alert('Chyba pri generovaní reportu: ' + error.message);
-    } finally {
-      setGenerating(false);
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to generate report');
     }
-  };
+
+    alert(`Report vygenerovaný! Celkovo ${data.summary.totalCollections} záznamov.`);
+    console.log('Volám loadReporty pre obecId:', obec.id);
+    await loadReporty(obec.id);
+    console.log('loadReporty dokončené');
+  } catch (error) {
+    console.error('Error generating report:', error);
+    alert('Chyba pri generovaní reportu: ' + error.message);
+  } finally {
+    setGenerating(false);
+  }
+};
 
   const downloadFile = (dataUri, filename) => {
     const link = document.createElement('a');

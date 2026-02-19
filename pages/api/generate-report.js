@@ -1,7 +1,33 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient } from '@supabase/supabase-js';
 import { stringify } from 'csv-stringify/sync';
-import { Builder } from 'xml2js';
 import ExcelJS from 'exceljs';
+
+// Mapovanie typov odpadu na kódy podľa Európskeho katalógu odpadov (EWC) a slovenskej legislatívy
+const WASTE_CODE_MAPPING = {
+  'zmesovy': { kod: '20 03 01', nakladanie: 'D01', nazov: 'Zmiešaný komunálny odpad' },
+  'plast': { kod: '20 01 39', nakladanie: 'R03', nazov: 'Plast - triedený komunálny odpad' },
+  'papier': { kod: '20 01 01', nakladanie: 'R03', nazov: 'Papier - triedený komunálny odpad' },
+  'sklo': { kod: '20 01 02', nakladanie: 'R03', nazov: 'Sklo - triedený komunálny odpad' }
+};
+
+// Funkcia na získanie kódu odpadu a nakladania
+function getWasteCodes(typOdpadu, kodOdpadu, kodNakladania) {
+  if (kodOdpadu && kodNakladania) {
+    return { kod: kodOdpadu, nakladanie: kodNakladania };
+  }
+  const mapping = WASTE_CODE_MAPPING[typOdpadu];
+  return mapping || { kod: kodOdpadu || '20 03 01', nakladanie: kodNakladania || 'D01' };
+}
+
+// Funkcia na escapovanie XML znakov
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -9,231 +35,253 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Získanie tokenu z hlavičky Authorization
+    // Overenie tokenu
     const authHeader = req.headers.authorization;
     const token = authHeader?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'No token' });
 
-    if (!token) {
-      return res.status(401).json({ error: 'No authorization token provided' });
-    }
-
-    // 2. Vytvorenie Supabase klienta s tokenom
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-      {
-        global: {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
-      }
+      { global: { headers: { Authorization: `Bearer ${token}` } } }
     );
 
-    // 3. Overenie tokenu – získanie používateľa
     const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return res.status(401).json({ error: 'Unauthorized' });
 
-    if (authError || !user) {
-      console.error('Auth error:', authError);
-      return res.status(401).json({ error: 'Unauthorized - Invalid token' });
-    }
-
-    const { kvartal, rok } = req.body;
-
-    if (!kvartal || !rok) {
-      return res.status(400).json({ error: 'Missing kvartal or rok' });
-    }
-
-    if (kvartal < 1 || kvartal > 4) {
-      return res.status(400).json({ error: 'Invalid kvartal (must be 1-4)' });
-    }
-
-    // 4. Získanie obce prihláseného používateľa
+    // Získanie údajov o obci
     const { data: obec, error: obecError } = await supabase
       .from('obce')
       .select('*')
       .eq('auth_user_id', user.id)
       .single();
 
-    if (obecError || !obec) {
-      console.error('Obec error:', obecError);
-      return res.status(404).json({ error: 'Municipality not found' });
-    }
+    if (obecError || !obec) return res.status(404).json({ error: 'Obec nenájdená' });
 
-    // 5. Výpočet kvartálu
+    const { kvartal, rok } = req.body;
+    if (!kvartal || !rok) return res.status(400).json({ error: 'Chýba kvartál alebo rok' });
+
+    // Validácia kvartálu a roka
+    if (kvartal < 1 || kvartal > 4) return res.status(400).json({ error: 'Neplatný kvartál' });
+    if (rok < 2000 || rok > 2100) return res.status(400).json({ error: 'Neplatný rok' });
+
+    // Výpočet kvartálu - opravené pre roky 2027+
     const quarterStartMonth = (kvartal - 1) * 3;
     const quarterEndMonth = quarterStartMonth + 2;
     
-    const startDate = new Date(rok, quarterStartMonth, 1);
-    const endDate = new Date(rok, quarterEndMonth + 1, 0);
+    // Použitie UTC dátumu pre správne výpočty aj pre budúce roky
+    const startDate = new Date(Date.UTC(rok, quarterStartMonth, 1));
+    const endDate = new Date(Date.UTC(rok, quarterEndMonth + 1, 0, 23, 59, 59));
+    
+    // Formátovanie dátumov pre databázu (YYYY-MM-DD)
+    const startDateStr = startDate.toISOString().split('T')[0];
+    const endDateStr = endDate.toISOString().split('T')[0];
 
-    // 6. Získanie vývozov za daný kvartál
+    // Získanie všetkých vývozov za obdobie
     const { data: vyvozy, error: vyvozError } = await supabase
       .from('vyvozy')
-      .select(`
-        *,
-        obyvatelia (meno, priezvisko, ulica, cislo_popisne)
-      `)
+      .select('*')
       .eq('obec_id', obec.id)
-      .gte('datum', startDate.toISOString().split('T')[0])
-      .lte('datum', endDate.toISOString().split('T')[0])
-      .order('datum', { ascending: true });
+      .gte('datum', startDateStr)
+      .lte('datum', endDateStr);
 
-    if (vyvozError) {
-      console.error('Vyvoz error:', vyvozError);
-      throw vyvozError;
+    if (vyvozError) throw vyvozError;
+
+    if (!vyvozy || vyvozy.length === 0) {
+      return res.status(200).json({
+        success: true,
+        xml: null,
+        csv: null,
+        xlsx: null,
+        summary: {
+          totalCollections: 0,
+          totalKg: '0.00',
+          message: 'Pre vybrané obdobie nie sú žiadne vývozy'
+        }
+      });
     }
 
-    // 7. Agregácia dát podľa typu odpadu
-    const aggregatedData = {
-      zmesovy: 0,
-      plast: 0,
-      papier: 0,
-      sklo: 0
-    };
-
-    vyvozy?.forEach(vyvoz => {
-      aggregatedData[vyvoz.typ_odpadu] += parseFloat(vyvoz.mnozstvo_kg);
-    });
-
-    // 8. Generovanie CSV (opravené)
-    const csvData = [
-      { Obec: obec.nazov, Kvartál: kvartal, Rok: rok, Typ_odpadu: 'Zmiešaný odpad', Mnozstvo_kg: aggregatedData.zmesovy.toFixed(2).replace('.', ',') },
-      { Obec: obec.nazov, Kvartál: kvartal, Rok: rok, Typ_odpadu: 'Plast', Mnozstvo_kg: aggregatedData.plast.toFixed(2).replace('.', ',') },
-      { Obec: obec.nazov, Kvartál: kvartal, Rok: rok, Typ_odpadu: 'Papier', Mnozstvo_kg: aggregatedData.papier.toFixed(2).replace('.', ',') },
-      { Obec: obec.nazov, Kvartál: kvartal, Rok: rok, Typ_odpadu: 'Sklo', Mnozstvo_kg: aggregatedData.sklo.toFixed(2).replace('.', ',') },
-    ];
-
-    const csvContent = stringify(csvData, {
-      header: true,
-      delimiter: ';',
-      bom: true
-    });
-
-    // 9. Generovanie XML
-    const xmlBuilder = new Builder({
-      rootName: 'Report',
-      xmldec: { version: '1.0', encoding: 'UTF-8' }
-    });
-
-    const xmlData = {
-      Municipality: obec.nazov,
-      Quarter: kvartal,
-      Year: rok,
-      GeneratedDate: new Date().toISOString(),
-      WasteData: {
-        Waste: [
-          { Type: 'zmesovy', Label: 'Zmiešaný odpad', Amount: aggregatedData.zmesovy.toFixed(2), Unit: 'kg' },
-          { Type: 'plast', Label: 'Plast', Amount: aggregatedData.plast.toFixed(2), Unit: 'kg' },
-          { Type: 'papier', Label: 'Papier', Amount: aggregatedData.papier.toFixed(2), Unit: 'kg' },
-          { Type: 'sklo', Label: 'Sklo', Amount: aggregatedData.sklo.toFixed(2), Unit: 'kg' }
-        ]
-      },
-      TotalCollections: vyvozy?.length || 0,
-      Summary: {
-        TotalWaste: Object.values(aggregatedData).reduce((a, b) => a + b, 0).toFixed(2),
-        SortedWaste: (aggregatedData.plast + aggregatedData.papier + aggregatedData.sklo).toFixed(2),
-        MixedWaste: aggregatedData.zmesovy.toFixed(2)
+    // Agregácia podľa (kod_odpadu, kod_nakladania) s automatickým mapovaním
+    const aggregated = {};
+    vyvozy.forEach(v => {
+      const codes = getWasteCodes(v.typ_odpadu, v.kod_odpadu, v.kod_nakladania);
+      const key = `${codes.kod}_${codes.nakladanie}`;
+      
+      if (!aggregated[key]) {
+        aggregated[key] = {
+          kod_odpadu: codes.kod,
+          nazov_odpadu: WASTE_CODE_MAPPING[v.typ_odpadu]?.nazov || v.typ_odpadu,
+          kod_nakladania: codes.nakladanie,
+          celkom_kg: 0
+        };
       }
-    };
+      aggregated[key].celkom_kg += parseFloat(v.mnozstvo_kg || 0);
+    });
 
-    const xmlContent = xmlBuilder.buildObject(xmlData);
+    const aggregatedArray = Object.values(aggregated).filter(item => item.celkom_kg > 0);
 
-    // 10. Generovanie XLSX
+    // 1. Vytvorenie XML podľa ISOH formátu pre Slovensko
+    // Formátovanie dátumu pre XML (YYYY-MM-DD)
+    const today = new Date();
+    const formattedDate = today.toISOString().split('T')[0];
+
+    // Vytvorenie XML manuálne pre lepšiu kontrolu formátu
+    let xmlContent = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+    xmlContent += `<Ohlasenie xmlns="http://www.isoh.gov.sk/schema/ohlasenie" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.isoh.gov.sk/schema/ohlasenie http://www.isoh.gov.sk/schema/ohlasenie.xsd">\n`;
+    xmlContent += `  <Identifikacia>\n`;
+    xmlContent += `    <TypDokladu>P</TypDokladu>\n`;
+    xmlContent += `    <Rok>${rok}</Rok>\n`;
+    xmlContent += `    <Kvartal>${kvartal}</Kvartal>\n`;
+    xmlContent += `    <DatumVytvorenia>${formattedDate}</DatumVytvorenia>\n`;
+    xmlContent += `  </Identifikacia>\n`;
+    xmlContent += `  <Organizacia>\n`;
+    xmlContent += `    <ICO>${obec.ico || ''}</ICO>\n`;
+    xmlContent += `    <Nazov>${escapeXml(obec.nazov || '')}</Nazov>\n`;
+    xmlContent += `    <Adresa>\n`;
+    xmlContent += `      <Ulica>${escapeXml(obec.ulica || '')}</Ulica>\n`;
+    xmlContent += `      <Mesto>${escapeXml(obec.mesto || '')}</Mesto>\n`;
+    xmlContent += `      <PSC>${obec.psc || ''}</PSC>\n`;
+    xmlContent += `    </Adresa>\n`;
+    xmlContent += `  </Organizacia>\n`;
+    xmlContent += `  <NakladanieSOdpadom>\n`;
+    
+    aggregatedArray.forEach(item => {
+      xmlContent += `    <Zaznam>\n`;
+      xmlContent += `      <KodOdpadu>${item.kod_odpadu}</KodOdpadu>\n`;
+      xmlContent += `      <KodNakladania>${item.kod_nakladania}</KodNakladania>\n`;
+      xmlContent += `      <MnozstvoKG>${parseFloat(item.celkom_kg).toFixed(2)}</MnozstvoKG>\n`;
+      xmlContent += `    </Zaznam>\n`;
+    });
+    
+    xmlContent += `  </NakladanieSOdpadom>\n`;
+    xmlContent += `</Ohlasenie>`;
+    const xmlBase64 = Buffer.from(xmlContent, 'utf8').toString('base64');
+    const xmlDataUri = `data:text/xml;charset=utf-8;base64,${xmlBase64}`;
+
+    // 2. CSV podľa slovenského formátu (oddeľovač ;, desatinná čiarka)
+    const csvData = [
+      ['Kód odpadu', 'Kód nakladania', 'Množstvo (kg)'],
+      ...aggregatedArray.map(item => [
+        item.kod_odpadu,
+        item.kod_nakladania,
+        parseFloat(item.celkom_kg).toFixed(2).replace('.', ',')
+      ])
+    ];
+    const csvContent = stringify(csvData, { 
+      delimiter: ';', 
+      bom: true,
+      header: false,
+      quoted: false
+    });
+    const csvBase64 = Buffer.from(csvContent, 'utf8').toString('base64');
+    const csvDataUri = `data:text/csv;charset=utf-8;base64,${csvBase64}`;
+
+    // 3. XLSX s formátovaním
     const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet(`Q${kvartal} ${rok}`);
-
+    const worksheet = workbook.addWorksheet(`Report Q${kvartal} ${rok}`);
+    
     // Hlavička
-    worksheet.addRow(['Obecný odpadový systém']).font = { bold: true, size: 14 };
-    worksheet.addRow([`Obec: ${obec.nazov}`]);
-    worksheet.addRow([`Kvartál: Q${kvartal} ${rok}`]);
-    worksheet.addRow([]);
-
-    // Hlavičky tabuľky
-    const headerRow = worksheet.addRow(['Typ odpadu', 'Množstvo (kg)']);
+    const headerRow = worksheet.addRow(['Kód odpadu', 'Kód nakladania', 'Množstvo (kg)']);
     headerRow.font = { bold: true };
     headerRow.fill = {
       type: 'pattern',
       pattern: 'solid',
       fgColor: { argb: 'FFE0E0E0' }
     };
-
+    
     // Dáta
-    worksheet.addRow(['Zmiešaný odpad', aggregatedData.zmesovy]);
-    worksheet.addRow(['Plast', aggregatedData.plast]);
-    worksheet.addRow(['Papier', aggregatedData.papier]);
-    worksheet.addRow(['Sklo', aggregatedData.sklo]);
-
-    // Súhrn
-    worksheet.addRow([]);
-    const totalRow = worksheet.addRow(['Celkom', Object.values(aggregatedData).reduce((a, b) => a + b, 0)]);
-    totalRow.font = { bold: true };
-    const sortedRow = worksheet.addRow(['Vytriedené (plast+papier+sklo)', 
-      aggregatedData.plast + aggregatedData.papier + aggregatedData.sklo]);
-    sortedRow.font = { bold: true };
-
-    // Formátovanie čísel
-    worksheet.getColumn(2).numFmt = '#,##0.00 "kg"';
-    worksheet.getColumn(2).width = 15;
-    worksheet.getColumn(1).width = 25;
-
-    // Vygenerovať buffer a base64
+    aggregatedArray.forEach(item => {
+      const row = worksheet.addRow([
+        item.kod_odpadu,
+        item.kod_nakladania,
+        parseFloat(item.celkom_kg)
+      ]);
+      row.getCell(3).numFmt = '0.00'; // Formát pre množstvo
+    });
+    
+    // Šírka stĺpcov
+    worksheet.columns = [
+      { width: 15 },
+      { width: 15 },
+      { width: 15 }
+    ];
+    
     const buffer = await workbook.xlsx.writeBuffer();
     const xlsxBase64 = buffer.toString('base64');
     const xlsxDataUri = `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${xlsxBase64}`;
 
-    // 11. Base64 pre ostatné formáty
-    const csvBase64 = Buffer.from(csvContent).toString('base64');
-    const xmlBase64 = Buffer.from(xmlContent).toString('base64');
+    // 4. Uloženie do tabuľky reporty s riadnym ošetrením chýb
+    try {
+      console.log(`Ukladám report pre obec ${obec.id}, kvartál ${kvartal}, rok ${rok}`);
 
-    const csvDataUri = `data:text/csv;base64,${csvBase64}`;
-    const xmlDataUri = `data:text/xml;base64,${xmlBase64}`;
-
-    // 12. Uloženie do tabuľky reporty
-    const { data: existingReport } = await supabase
-      .from('reporty')
-      .select('*')
-      .eq('obec_id', obec.id)
-      .eq('kvartal', kvartal)
-      .eq('rok', rok)
-      .maybeSingle();
-
-    if (existingReport) {
-      await supabase
+      // Skontrolujeme, či už existuje záznam
+      const { data: existingReport, error: selectError } = await supabase
         .from('reporty')
-        .update({
-          subor_csv: csvDataUri,
-          subor_xml: xmlDataUri,
-          subor_xlsx: xlsxDataUri,
-          vygenerovane_dna: new Date().toISOString()
-        })
-        .eq('id', existingReport.id);
-    } else {
-      await supabase
-        .from('reporty')
-        .insert([{
-          obec_id: obec.id,
-          kvartal,
-          rok,
-          subor_csv: csvDataUri,
-          subor_xml: xmlDataUri,
-          subor_xlsx: xlsxDataUri
-        }]);
+        .select('id')
+        .eq('obec_id', obec.id)
+        .eq('kvartal', kvartal)
+        .eq('rok', rok)
+        .maybeSingle();
+
+      if (selectError) {
+        console.error('Chyba pri kontrole existencie reportu:', selectError);
+        // Aj keď je chyba, pokračujeme ďalej, aby sme aspoň vrátili vygenerované súbory
+      } else {
+        if (existingReport) {
+          // Aktualizácia existujúceho reportu
+          const { error: updateError } = await supabase
+            .from('reporty')
+            .update({
+              subor_csv: csvDataUri,
+              subor_xml: xmlDataUri,
+              subor_xlsx: xlsxDataUri,
+              vygenerovane_dna: new Date().toISOString()
+            })
+            .eq('id', existingReport.id);
+
+          if (updateError) {
+            console.error('Chyba pri update reportu:', updateError);
+          } else {
+            console.log('Report úspešne aktualizovaný');
+          }
+        } else {
+          // Vloženie nového reportu
+          const { error: insertError } = await supabase
+            .from('reporty')
+            .insert([{
+              obec_id: obec.id,
+              kvartal,
+              rok,
+              subor_csv: csvDataUri,
+              subor_xml: xmlDataUri,
+              subor_xlsx: xlsxDataUri
+            }]);
+
+          if (insertError) {
+            console.error('Chyba pri insert reportu:', insertError);
+          } else {
+            console.log('Report úspešne vložený');
+          }
+        }
+      }
+    } catch (dbError) {
+      console.error('Výnimka pri ukladaní reportu do DB:', dbError);
     }
 
+    // Odoslanie odpovede
     res.status(200).json({
       success: true,
-      csv: csvDataUri,
       xml: xmlDataUri,
+      csv: csvDataUri,
       xlsx: xlsxDataUri,
       summary: {
-        totalCollections: vyvozy?.length || 0,
-        aggregatedData
+        totalCollections: vyvozy.length,
+        totalKg: aggregatedArray.reduce((sum, i) => sum + i.celkom_kg, 0).toFixed(2)
       }
     });
 
   } catch (error) {
-    console.error('Error generating report:', error);
+    console.error('Chyba pri generovaní reportu:', error);
     res.status(500).json({ error: error.message });
   }
 }
